@@ -37,7 +37,7 @@
 # endif
 #endif
 
-#include <faad.h>
+#include <neaacdec.h>
 
 #include <gpac/modules/codec.h>
 #include <gpac/constants.h>
