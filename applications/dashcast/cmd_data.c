@@ -267,6 +267,59 @@ static Bool parse_time(const char* str_time, struct tm *tm_time)
 	return GF_TRUE;
 }
 
+void dc_parse_utc_timing(GF_List* dst, char* utc_timing_param) {
+	int utc_timing_param_length = strlen(utc_timing_param);
+	s32 uri_beginning = 0;
+	s32 uri_end;
+	s32 value_end;
+	size_t uri_length;
+	size_t value_length;
+	char* uri_string;
+	char* value_string;
+	UTCTimingConfPair* utc_timing_pair;
+
+	while (uri_beginning != -1) {
+		uri_end = gf_token_find(utc_timing_param, uri_beginning, utc_timing_param_length, ";");
+		uri_length = uri_end - uri_beginning;
+
+		// Yes we all know that it is defined to be 1 but for the sake of political correctness we do sizeof on char
+		uri_string = (char*) malloc(sizeof (char) * uri_length + 1);
+		strncpy(uri_string, utc_timing_param + uri_beginning, uri_length);
+		uri_string[uri_length] = '\0';
+
+		value_end = gf_token_find(utc_timing_param, uri_end + 1, utc_timing_param_length, ";");
+
+		if ((int) value_end == -1) {
+			value_length = utc_timing_param_length - uri_end;
+			uri_beginning = value_end;
+		}
+		else {
+			value_length = value_end - uri_end - 1;
+			uri_beginning = value_end + 1;
+		}
+
+		value_string = (char*) malloc(sizeof (char) * value_length + 1);
+		strncpy(value_string, utc_timing_param + uri_end + 1, value_length);
+		value_string[value_length] = '\0';
+
+		GF_SAFEALLOC(utc_timing_pair, UTCTimingConfPair);
+		utc_timing_pair->scheme = uri_string;
+		utc_timing_pair->value = value_string;
+
+		gf_list_add(dst, utc_timing_pair);
+	}
+}
+
+void dc_utc_timing_destroy(GF_List* dst) {
+	while (gf_list_count(dst)) {
+		UTCTimingConfPair* item_to_remove = (UTCTimingConfPair*) gf_list_pop_back(dst);
+		free(item_to_remove->scheme);
+		free(item_to_remove->value);
+		free(item_to_remove);
+	}
+	free(dst);
+}
+
 int dc_read_switch_config(CmdData *cmd_data)
 {
 	u32 i;
@@ -366,6 +419,7 @@ void dc_cmd_data_init(CmdData *cmd_data)
 	cmd_data->video_lst = gf_list_new();
 	cmd_data->asrc = gf_list_new();
 	cmd_data->vsrc = gf_list_new();
+	cmd_data->utc_timing = gf_list_new();
 }
 
 void dc_cmd_data_destroy(CmdData *cmd_data)
@@ -392,6 +446,7 @@ void dc_cmd_data_destroy(CmdData *cmd_data)
 		gf_fclose(cmd_data->logfile);
 
 	dc_task_destroy(&cmd_data->task_list);
+	dc_utc_timing_destroy(cmd_data->utc_timing);
 
 	gf_sys_close();
 }
@@ -464,9 +519,7 @@ int dc_parse_command(int argc, char **argv, CmdData *cmd_data)
 	    "Output options:\n"
 	    "* Video encoding options:\n"
 	    "    -vcodec string          set the output video codec (default: h264)\n"
-#if 0 //TODO: bind to option and params - test first how it binds to current input parameters
 	    "    -vb int                 set the output video bitrate (in bits)\n"
-#endif
 	    "    -vcustom string         send custom parameters directly to the video encoder\n"
 	    "    -gdr                    use Gradual Decoder Refresh feature for video encoding (h264 codec only)\n"
 	    "    -gop                    specify GOP size in frames - default is framerate (1 sec gop)\n"
@@ -492,6 +545,8 @@ int dc_parse_command(int argc, char **argv, CmdData *cmd_data)
 	    "                                - the default value is 10. Specify -1 to keep all files.\n"
 	    "    -min-buffer dur:float    dur is the MPD minBufferTime in seconds (default value: 1.0)\n"
 	    "    -base-url baseurl:str    baseurl is the MPD BaseURL\n"
+		"    -utc-timing:str          control the UTCTiming element in MPD. ';' separated string pairs.\n"
+		"                                Example: -utc-timing \"head;http://localhost;direct;\"\n"
 	    "\n"
 	    "\n"
 	    "Examples:\n"
@@ -628,7 +683,18 @@ int dc_parse_command(int argc, char **argv, CmdData *cmd_data)
 				fprintf(stderr, "%s", command_usage);
 				return -1;
 			}
+			fprintf(stderr, "Video codec being set to %s.\n", argv[i]);
 			strncpy(cmd_data->video_data_conf.codec, argv[i], GF_MAX_PATH-1);
+			i++;
+		} else if (strcmp(argv[i], "-vb") == 0) {
+			DASHCAST_CHECK_NEXT_ARG
+			if (cmd_data->video_data_conf.bitrate != -1) {
+				fprintf(stderr, "Video bitrate has already been specified.\n");
+				fprintf(stderr, "%s", command_usage);
+				return -1;
+			}
+			fprintf(stderr, "Video bitrate being set to %s.\n", argv[i]);
+			cmd_data->video_data_conf.bitrate = atoi(argv[i]);
 			i++;
 		} else if (strcmp(argv[i], "-vcustom") == 0) {
 			DASHCAST_CHECK_NEXT_ARG
@@ -734,6 +800,16 @@ int dc_parse_command(int argc, char **argv, CmdData *cmd_data)
 				return -1;
 			}
 			cmd_data->minimum_update_period = atoi(argv[i]);
+			i++;
+		} else if (strcmp(argv[i], "-utc-timing") == 0) {
+			DASHCAST_CHECK_NEXT_ARG
+			if (gf_list_count(cmd_data->utc_timing))
+			{
+				fprintf(stderr, "UTCTiming (utc-timing) has already been specified\n");
+				fprintf(stderr, "%s", command_usage);
+				return -1;
+			}
+			dc_parse_utc_timing(cmd_data->utc_timing, argv[i]);
 			i++;
 		} else if (strcmp(argv[i], "-time-shift") == 0) {
 			DASHCAST_CHECK_NEXT_ARG

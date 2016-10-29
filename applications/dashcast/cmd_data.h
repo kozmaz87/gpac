@@ -36,10 +36,18 @@
 #include <time.h>
 #include <gpac/config_file.h>
 #include <gpac/list.h>
+#include <gpac/token.h>
 #include "audio_data.h"
 #include "video_data.h"
 #include "task.h"
 
+/*
+ * This structure represents a UTCTiming element
+ */
+typedef struct {
+	char* scheme;
+	char* value;
+} UTCTimingConfPair;
 
 /*
  * This structure corresponds to
@@ -56,6 +64,8 @@ typedef struct {
 	GF_Config *switch_conf;
 	/* MPD file */
 	char mpd_filename[GF_MAX_PATH];
+	/* UTCTiming control */
+	GF_List *utc_timing;
 	/* segment duration */
 	int seg_dur;
 	/* fragment duration */
@@ -108,7 +118,7 @@ typedef struct {
 	int insert_utc;
 
 	Bool use_source_timing;
-    GF_MemTrackerType mem_track;
+	GF_MemTrackerType mem_track;
 	Bool no_mpd_rewrite;
 } CmdData;
 

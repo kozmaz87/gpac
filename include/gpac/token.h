@@ -91,7 +91,7 @@ s32 gf_token_get_line(const char *buffer, u32 start, u32 size, char *line_buffer
  *\param Start char offset from beginning of buffer where tokenization shall start
  *\param Size size of the input buffer to analyze
  *\param Pattern pattern to locate
- *\return position of the first char in the buffer after the pattern, or -1 if pattern could not be found
+ *\return position of the last char of the found pattern in the buffer, or -1 if pattern could not be found
  */
 s32 gf_token_find(const char* Buffer, u32 Start, u32 Size, const char* Pattern);
 

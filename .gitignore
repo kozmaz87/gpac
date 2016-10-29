@@ -87,4 +87,5 @@ configure-stamp
 gpac.pc
 tests/external_media/
 tests/results/
+nbproject/
 

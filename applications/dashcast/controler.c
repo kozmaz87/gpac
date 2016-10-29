@@ -24,6 +24,8 @@
  */
 
 #include "controler.h"
+#include "cmd_data.h"
+#include <stdio.h>
 
 
 #if (!defined(__DARWIN__) && !defined(__APPLE__))
@@ -44,6 +46,7 @@
 #endif
 
 #include <gpac/network.h>
+#include <gpac/unicode.h>
 
 typedef struct {
 	int segnum;
@@ -67,6 +70,7 @@ typedef struct {
 
 #define AUDIO_FRAME_SIZE 1024
 
+const char* UTC_DATE_TIME_FORMAT = "%d-%02d-%02dT%02d:%02d:%02d.%03dZ";
 
 void optimize_seg_frag_dur(int *seg, int *frag)
 {
@@ -127,7 +131,7 @@ u32 send_frag_event(void *params)
 	return 0;
 }
 
-static void dc_write_mpd(CmdData *cmddata, const AudioDataConf *audio_data_conf, const VideoDataConf *video_data_conf, const char *presentation_duration, const char *availability_start_time, const char *time_shift, const int segnum, const int ast_offset)
+static void dc_write_mpd(CmdData *cmddata, const AudioDataConf *audio_data_conf, const VideoDataConf *video_data_conf, const char *presentation_duration, const char *availability_start_time, const char *time_shift, const int segnum, const int ast_offset, const char *publish_time)
 {
 	u32 i = 0;
 	int audio_seg_dur = 0, video_seg_dur = 0, audio_frag_dur = 0,	video_frag_dur = 0;
@@ -159,23 +163,14 @@ static void dc_write_mpd(CmdData *cmddata, const AudioDataConf *audio_data_conf,
 	}
 
 	f = gf_fopen(name, "w");
-	//TODO: if (!f) ...
-
-	//	time_t t = time(NULL);
-	//	time_t t2 = t + 2;
-	//	t += (2 * (cmddata->seg_dur / 1000.0));
-	//	tm = *gmtime(&t2);
-	//	snprintf(availability_start_time, "%d-%d-%dT%d:%d:%dZ", tm.tm_year + 1900,
-	//			tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
-	//	fprintf(stdout, "%s \n", availability_start_time);
 
 	fprintf(f, "<?xml version=\"1.0\"?>\n");
-	fprintf(f, "<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" profiles=\"urn:mpeg:dash:profile:full:2011\" minBufferTime=\"PT%fS\"", cmddata->min_buffer_time);
+	fprintf(f, "<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" minBufferTime=\"PT%fS\"", cmddata->min_buffer_time);
 	
 	if (cmddata->mode == ON_DEMAND) {
-		fprintf(f, " type=\"static\" mediaPresentationDuration=\"%s\"", presentation_duration);
+		fprintf(f, " profiles=\"urn:mpeg:dash:profile:full:2011\" type=\"static\" mediaPresentationDuration=\"%s\"", presentation_duration);
 	} else {
-		fprintf(f, " type=\"dynamic\" availabilityStartTime=\"%s\"", availability_start_time);
+		fprintf(f, " profiles=\"urn:mpeg:dash:profile:isoff-live:2011\" type=\"dynamic\" publishTime=\"%s\" availabilityStartTime=\"%s\"", publish_time, availability_start_time);
 		if (time_shift) fprintf(f, " timeShiftBufferDepth=\"%s\"", time_shift);
 
 		if (cmddata->minimum_update_period > 0)
@@ -192,7 +187,7 @@ static void dc_write_mpd(CmdData *cmddata, const AudioDataConf *audio_data_conf,
 	if (strcmp(cmddata->base_url, "") != 0) {
 		fprintf(f, " <BaseURL>%s</BaseURL>\n", cmddata->base_url);
 	}
-
+	
 	fprintf(f, " <Period start=\"PT0H0M0.000S\" id=\"P1\">\n");
 
 	if (strcmp(cmddata->audio_data_conf.filename, "") != 0) {
@@ -242,7 +237,7 @@ static void dc_write_mpd(CmdData *cmddata, const AudioDataConf *audio_data_conf,
 		for (i = 0; i < gf_list_count(cmddata->video_lst); i++) {
 			video_data_conf = (VideoDataConf*)gf_list_get(cmddata->video_lst, i);
 			fprintf(f, "   <Representation id=\"%s\" mimeType=\"video/mp4\" codecs=\"%s\" "
-			        "width=\"%d\" height=\"%d\" frameRate=\"%d\" sar=\"1:1\" startWithSAP=\"1\" bandwidth=\"%d\">\n"
+			        "width=\"%d\" height=\"%d\" frameRate=\"%d\" startWithSAP=\"1\" bandwidth=\"%d\">\n"
 			        "   </Representation>\n", video_data_conf->filename,
 			        VIDEO_MUXER == GPAC_INIT_VIDEO_MUXER_AVC1 ? video_data_conf->codec6381 : "avc3",
 			        video_data_conf->width, video_data_conf->height, video_data_conf->framerate,
@@ -253,6 +248,25 @@ static void dc_write_mpd(CmdData *cmddata, const AudioDataConf *audio_data_conf,
 	}
 
 	fprintf(f, " </Period>\n");
+
+	if (gf_list_count(cmddata->utc_timing) && publish_time) {
+		
+		u32 pos = 0;
+		UTCTimingConfPair* cur_pair;
+		while((cur_pair = gf_list_enum(cmddata->utc_timing, &pos))){
+			if (strcmp("http-head", cur_pair->scheme) == 0) {
+				fprintf(
+					f, " <UTCTiming schemeIdUri=\"%s\" value=\"%s\" />\n",
+					"urn:mpeg:dash:utc:http-head:2014", cur_pair->value
+				);
+			} else if (strcmp("direct", cur_pair->scheme) == 0) {
+				fprintf(
+					f, " <UTCTiming schemeIdUri=\"%s\" value=\"%s\" />\n",
+					"urn:mpeg:dash:utc:direct:2014", publish_time
+				);
+			}
+		}
+	}
 
 	fprintf(f, "</MPD>\n");
 
@@ -266,10 +280,12 @@ static u32 mpd_thread(void *params)
 	MessageQueue *mq = th_param->mq;
 	char availability_start_time[GF_MAX_PATH];
 	char presentation_duration[GF_MAX_PATH];
+	char publish_time[GF_MAX_PATH];
 	char time_shift[GF_MAX_PATH] = "";
 	AudioDataConf *audio_data_conf = NULL;
 	VideoDataConf *video_data_conf = NULL;
 	struct tm ast_time;
+	struct tm pub_time;
 	int dur = 0;
 	int h, m, s, ms;
 	segtime last_seg_time;
@@ -323,10 +339,14 @@ static u32 mpd_thread(void *params)
 			t = (seg_time.ntpts >> 32)  - GF_NTP_SEC_1900_TO_1970;
 			msecs = (u32) ( (seg_time.ntpts & 0xFFFFFFFF) * (1000.0/0xFFFFFFFF) );
 			ast_time = *gmtime(&t);
-			fprintf(stdout, "Generating MPD at %d-%02d-%02dT%02d:%02d:%02d.%03dZ\n", 1900 + ast_time.tm_year, ast_time.tm_mon+1, ast_time.tm_mday, ast_time.tm_hour, ast_time.tm_min, ast_time.tm_sec, msecs);
-			GF_LOG(GF_LOG_DEBUG, GF_LOG_DASH, ("[DashCast] Generating MPD at %d-%02d-%02dT%02d:%02d:%02d.%03dZ - UTC "LLU" ms - AST UTC "LLU" ms\n", 1900 + ast_time.tm_year, ast_time.tm_mon+1, ast_time.tm_mday, ast_time.tm_hour, ast_time.tm_min, ast_time.tm_sec, msecs, seg_time.utc_time, main_seg_time.utc_time));
-
-			t = (main_seg_time.ntpts >> 32)  - GF_NTP_SEC_1900_TO_1970;
+			
+			// We may be required to provide a publishTime
+			snprintf(publish_time, sizeof(publish_time), UTC_DATE_TIME_FORMAT, 1900 + ast_time.tm_year, ast_time.tm_mon+1, ast_time.tm_mday, ast_time.tm_hour, ast_time.tm_min, ast_time.tm_sec, msecs);
+			
+			fprintf(stdout, "Generating MPD at %s\n", publish_time);
+			GF_LOG(GF_LOG_DEBUG, GF_LOG_DASH, ("[DashCast] Generating MPD at %s - UTC "LLU" ms - AST UTC "LLU" ms\n", publish_time, seg_time.utc_time, main_seg_time.utc_time));
+			
+			t = (main_seg_time.ntpts >> 32)  - GF_NTP_SEC_1900_TO_1970;	
 			if (cmddata->ast_offset>0) {
 				t += cmddata->ast_offset/1000;
 			}
@@ -347,7 +367,7 @@ static u32 mpd_thread(void *params)
 				snprintf(time_shift, sizeof(time_shift), "PT%02dH%02dM%02dS", h, m, s);
 			}
 
-			dc_write_mpd(cmddata, audio_data_conf, video_data_conf, presentation_duration, availability_start_time, time_shift, main_seg_time.segnum+1, cmddata->ast_offset);
+			dc_write_mpd(cmddata, audio_data_conf, video_data_conf, presentation_duration, availability_start_time, time_shift, main_seg_time.segnum+1, cmddata->ast_offset, publish_time);
 		}
 		
 		if (cmddata->no_mpd_rewrite) return 0;
@@ -390,7 +410,7 @@ static u32 mpd_thread(void *params)
 	fprintf(stdout, "Duration: %s\n", presentation_duration);
 		
 
-	dc_write_mpd(cmddata, audio_data_conf, video_data_conf, presentation_duration, availability_start_time, 0, main_seg_time.segnum+1, 0);
+	dc_write_mpd(cmddata, audio_data_conf, video_data_conf, presentation_duration, availability_start_time, 0, main_seg_time.segnum+1, 0, 0);
 
 	return 0;
 }
@@ -1200,7 +1220,7 @@ int dc_run_controler(CmdData *in_data)
 
 		/* Initialize audio encoder threads */
 		for (i = 0; i < gf_list_count(in_data->audio_lst); i++)
-			aencoder_th_params[i].thread = gf_th_new("video_encoder_thread");
+			aencoder_th_params[i].thread = gf_th_new("audio_encoder_thread");
 	}
 
 	/******** Keyboard controler Thread ********/
